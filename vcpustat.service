@@ -1,0 +1,12 @@
+[Unit]
+Description=vCPU monitoring service
+After=libvirtd.service
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/vcpustat -m 100000 -f /var/log/vcpustat.log
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
