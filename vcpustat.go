@@ -33,6 +33,7 @@ import (
 )
 
 const QEMUACCT_PATTERN = "/sys/fs/cgroup/cpuacct/machine.slice/machine-qemu*.scope"
+const VERSION = "0.2"
 
 type machineToVcpuInfo map[string]map[string]VcpuInfo
 
@@ -93,8 +94,37 @@ func getVcpusInfo(machine string) (map[string]VcpuInfo) {
 	return vcpuInfo
 }
 
-func compareVcpuInfo(machine string, startVcpuInfo map[string]VcpuInfo, endVcpuInfo map[string]VcpuInfo, printlevel int64, marklevel, paniclevel int64) {
-	log.Printf("%s:", machine)
+func compareVcpuInfo(machinePath string, startVcpuInfo map[string]VcpuInfo, endVcpuInfo map[string]VcpuInfo, printlevel int64, marklevel, paniclevel int64, settleTime int64) {
+	machineName := path.Base(machinePath)
+
+	machinePidBytes, err := ioutil.ReadFile(machinePath + "/emulator/tasks")
+	if err != nil {
+		log.Printf("can't find PID for %s: %v\n", machineName, err)
+		return
+	}
+
+	machinePid := strings.Split(string(machinePidBytes), "\n")[0]
+
+	pf, err := os.OpenFile("/proc/" + machinePid, os.O_RDONLY, 0)
+	if err != nil {
+	    log.Printf("can't find proc dir for %s: %v\n", machineName, err)
+	    return
+	}
+	defer pf.Close()
+
+	info, err := pf.Stat()
+	if err != nil {
+		log.Printf(" can't stat proc dir for %s: %v\n", machineName, err)
+		return
+	}
+
+	machineSettled := false
+	machineTime := int64(time.Since(info.ModTime()).Seconds())
+	if machineTime >= settleTime {
+		machineSettled = true
+	}
+
+	log.Printf("%s (%d seconds, settled=%t):", machineName, machineTime, machineSettled)
 
 	vcpunums := make([]int, 0, len(startVcpuInfo))
 	for v := range startVcpuInfo {
@@ -123,10 +153,10 @@ func compareVcpuInfo(machine string, startVcpuInfo map[string]VcpuInfo, endVcpuI
 			}
 
 			diff := endInfo.CpuUsage - startInfo.CpuUsage
-			if paniclevel != -1 && diff <= paniclevel {
+			if machineSettled && paniclevel != -1 && diff <= paniclevel {
 				log.Printf(" %7s: %22d (PANIC)\n", vcpu, diff)
 				triggerPanic()
-			} else if marklevel != -1 && diff <= marklevel {
+			} else if machineSettled && marklevel != -1 && diff <= marklevel {
 				log.Printf(" %7s: %22d (WARN)\n", vcpu, diff)
 			} else if printlevel == -1 || diff <= printlevel {
 				log.Printf(" %7s: %22d\n", vcpu, diff)
@@ -142,10 +172,19 @@ func main() {
 	printlevel := flag.Int64("l", -1, "only print CPU usages equal or lower than printlevel")
 	marklevel := flag.Int64("m", -1, "put a (WARN) tag on CPU usages equal or lower than marklevel")
 	paniclevel := flag.Int64("p", -1, "trigger a Host panic if CPU usage is equal or lower than paniclevel")
+	settletime := flag.Int64("s", 120, "ignore marklevel and paniclevel if machine was running for less than settletime seconds")
 	logfile := flag.String("f", "", "log to this file instead of stdout")
+	version := flag.Bool("v", false, "display version information")
 	flag.Parse()
 
 	log.SetFlags(0)
+
+	if *version {
+		log.Printf("vcpustat version %s\n", VERSION)
+		log.Printf("(C) Sergio Lopez (slp <at> sinrega.org)\n")
+		os.Exit(0)
+	}
+
 	if *logfile != "" {
 		lf, err := os.OpenFile(*logfile, os.O_RDWR | os.O_CREATE | os.O_APPEND, 0666)
 		if err != nil {
@@ -196,7 +235,7 @@ func main() {
 		for _, machine := range machines {
 			name := path.Base(machine)
 
-			compareVcpuInfo(name, machineMap[name], getVcpusInfo(machine), *printlevel, *marklevel, *paniclevel)
+			compareVcpuInfo(machine, machineMap[name], getVcpusInfo(machine), *printlevel, *marklevel, *paniclevel, *settletime)
 		}
 		log.Println("")
 	}
